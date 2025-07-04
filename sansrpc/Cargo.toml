@@ -1,0 +1,30 @@
+[package]
+name = "sansrpc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sansrpc-proto = { path = "../sansrpc-proto" }
+sansrpc-service = { path = "../sansrpc-service" }
+sansrpc-compio = { path = "../sansrpc-compio", optional = true }
+compio = { version = "0.15.0", optional = true }
+sansrpc-tokio = { path = "../sansrpc-tokio", optional = true }
+sansrpc-macros = { path = "../sansrpc-macros", optional = true }
+serde = { version = "1.0.219", features = ["derive"] }
+futures = "0.3.31"
+async-trait = "0.1.88"
+
+[dev-dependencies]
+tokio = { version = "*", features = ["full"] }
+sansrpc-compio = { path = "../sansrpc-compio" }
+sansrpc-tokio = { path = "../sansrpc-tokio" }
+sansrpc-macros = { path = "../sansrpc-macros" }
+compio = { version = "0.15.0", features = ["all"] }
+
+
+[features]
+json = ["sansrpc-proto/json"]
+bincode = ["sansrpc-proto/bincode"]
+tokio = ["dep:sansrpc-tokio"]
+macros = ["dep:sansrpc-macros"]
+compio = ["dep:sansrpc-compio", "dep:compio"]

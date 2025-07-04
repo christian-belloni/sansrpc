@@ -1,0 +1,17 @@
+[package]
+name = "sansrpc-service"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+futures = "0.3.31"
+sansrpc-proto = { path = "../sansrpc-proto" }
+
+[features]
+json = ["sansrpc-proto/json"]
+bincode = ["sansrpc-proto/bincode"]
+
+
+[dev-dependencies]
+tokio = { version = "*", features = ["full"] }
+compio = { version = "*", features = ["all"] }

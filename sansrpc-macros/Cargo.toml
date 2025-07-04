@@ -1,0 +1,14 @@
+[package]
+name = "sansrpc-macros"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+proc-macro2 = "1.0.95"
+quote = "1.0.40"
+stringcase = "0.4.0"
+syn = { version = "2.0.104", features = ["full"] }
+
+
+[lib]
+proc-macro = true

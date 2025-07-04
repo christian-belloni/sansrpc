@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "sansrpc",
+    "sansrpc-compio",
+    "sansrpc-macros",
+    "sansrpc-proto",
+    "sansrpc-service",
+    "sansrpc-tokio",
+]
+resolver = "3"

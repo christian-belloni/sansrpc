@@ -1,7 +1,7 @@
 pub mod handle;
+pub mod sans_service;
 pub mod service;
 pub mod service_message;
-pub mod service_sink;
 
 #[cfg(test)]
 #[allow(unused)]
@@ -19,7 +19,7 @@ mod tests {
     use futures::{SinkExt, StreamExt};
     use sansrpc_proto::message::{Message, Oneshot, OpenStream, Request};
 
-    use crate::{service::SansService, service_message::ServiceMessage};
+    use crate::{sans_service::SansService, service_message::ServiceMessage};
 
     #[compio::test]
     async fn in_memory_test() {

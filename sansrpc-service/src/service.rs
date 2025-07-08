@@ -1,153 +1,98 @@
-use futures::{
-    FutureExt, Sink, SinkExt, Stream, StreamExt, TryStreamExt,
-    channel::{
-        mpsc::{UnboundedReceiver, UnboundedSender},
-        oneshot,
-    },
-};
-use sansrpc_proto::message::{Message, OpenStream, Request, Response, StreamMessage};
-use std::{collections::HashMap, io, pin::Pin};
+use crate::sans_service::SansService;
+use futures::{Sink, SinkExt, Stream, StreamExt};
+use sansrpc_proto::message::Message;
+use std::io;
 
-use crate::{
-    handle::ServiceHandle,
-    service_message::{ServiceInteraction, ServiceMessage},
-};
+pub trait Service<In, Out>: Clone + Send + 'static {
+    type Request: From<In> + Send;
+    type Oneshot: From<In> + Send;
+    type Stream: From<In> + Send;
 
-pub struct SansService<In, Out, Reader, Writer> {
-    reader: Reader,
-    writer: Writer,
+    type Response: Into<Out> + Send;
+    type StreamMessage: Into<Out> + Send;
+    type StreamResponse: Stream<Item = Result<Self::StreamMessage, Self::Error>> + Unpin + Send;
 
-    outgoing_stream: Pin<Box<dyn Stream<Item = StreamMessage<Out>>>>,
-    outgoing_responses: Pin<Box<dyn Stream<Item = Response<Out>>>>,
+    type Error: From<io::Error>
+        + From<futures::channel::mpsc::SendError>
+        + std::error::Error
+        + Send
+        + Sync
+        + 'static;
 
-    incoming_streams: HashMap<u64, UnboundedSender<StreamMessage<In>>>,
-    incoming_responses: HashMap<u64, oneshot::Sender<Response<In>>>,
+    fn spawn<K>(&self, future: impl Future<Output = K> + Send);
 
-    interaction: UnboundedReceiver<ServiceInteraction<In, Out>>,
+    fn handle_request(
+        &self,
+        request: Self::Request,
+    ) -> impl Future<Output = Result<Self::Response, Self::Error>> + Send;
+
+    fn handle_stream(
+        &self,
+        stream: Self::Stream,
+    ) -> impl Future<Output = Result<Self::StreamResponse, Self::Error>> + Send;
+
+    fn handle_oneshot(&self, oneshot: Self::Oneshot) -> impl Future<Output = ()> + Send;
+
+    fn shutdown(&self) -> impl Future<Output = ()>;
 }
 
-impl<In, Out, Reader, Writer> SansService<In, Out, Reader, Writer>
+pub struct ServiceInner<S, In, Out, Reader, Writer> {
+    sans_service: SansService<In, Out, Reader, Writer>,
+    service: S,
+}
+
+impl<S, In, Out, Reader, Writer> ServiceInner<S, In, Out, Reader, Writer>
 where
+    S: Service<In, Out>,
     Out: 'static,
     In: 'static,
     Reader: Stream<Item = io::Result<Message<In>>> + Unpin,
     Writer: Sink<Message<Out>, Error = io::Error> + Unpin,
 {
-    pub fn new(reader: Reader, writer: Writer) -> (Self, ServiceHandle<In, Out>) {
-        let (tx, rx) = futures::channel::mpsc::unbounded();
-        let this = Self {
-            reader,
-            writer,
-            outgoing_stream: Box::pin(futures::stream::pending()),
-            outgoing_responses: Box::pin(futures::stream::pending()),
-            incoming_streams: Default::default(),
-            incoming_responses: Default::default(),
-            interaction: rx,
-        };
-        (this, ServiceHandle(tx))
-    }
+    pub async fn run(&mut self) -> Result<(), S::Error> {
+        while let Some(next) = self.sans_service.next_message().await? {
+            match next {
+                crate::service_message::ServiceMessage::OpenStream(open_stream) => {
+                    let stream_id = open_stream.stream_id;
+                    let stream_request: S::Stream = open_stream.data.into();
+                    let sink = self
+                        .sans_service
+                        .recv_stream(stream_id, |data: S::StreamMessage| data.into())
+                        .await;
+                    let service = self.service.clone();
 
-    pub async fn next_message(&mut self) -> io::Result<Option<ServiceMessage<In>>> {
-        loop {
-            let mut next_out_stream = self.outgoing_stream.next().fuse();
-            let mut next_out_response = self.outgoing_responses.next().fuse();
-            let mut next_message = self.reader.try_next().fuse();
-
-            let mut next_interaction = self.interaction.next().fuse();
-
-            futures::select! {
-                next = next_message => {
-                    let Some(next) = next? else { return Ok(None) };
-                    match next {
-                        Message::Oneshot(oneshot) => return Ok(Some(ServiceMessage::Oneshot(oneshot))),
-                        Message::Request(request) => return Ok(Some(ServiceMessage::Request(request))),
-                        Message::Response(response) => {
-                            let Some(tx) = self.incoming_responses.remove(&response.request_id) else { continue };
-                            _ = tx.send(response);
-                        },
-                        Message::OpenStream(stream_request) => return Ok(Some(ServiceMessage::OpenStream(stream_request))),
-                        Message::StreamMessage(stream_message) => {
-                            let Some(tx) = self.incoming_streams.get(&stream_message.stream_id) else { continue };
-                            tx.unbounded_send(stream_message).unwrap();
-                        },
-                        Message::CloseStream { stream_id } => {
-                            self.incoming_streams.remove(&stream_id).unwrap();
-                        },
-                    }
-                },
-                out = next_out_stream => {
-                    if let Some(next) = out {
-                        self.writer.send(Message::StreamMessage(next)).await?;
-                    }
+                    self.service.spawn(async move {
+                        let stream = service.handle_stream(stream_request).await?;
+                        stream.forward(sink.sink_err_into()).await
+                    });
                 }
-                out = next_out_response => {
-                    if let Some(next) = out {
-                        self.writer.send(Message::Response(next)).await?;
-                    }
-                }
-                interaction = next_interaction => {
-                    let Some(interaction) = interaction else { continue };
+                crate::service_message::ServiceMessage::Request(request) => {
+                    let request_id = request.request_id;
+                    let request: S::Request = request.data.into();
 
-                    match interaction {
-                        ServiceInteraction::OpenStream(stream_request, sender) => {
-                            self.incoming_streams.insert(stream_request.stream_id, sender);
-                            self.writer.send(Message::OpenStream(stream_request)).await.unwrap();
-                        },
-                        ServiceInteraction::Request(request, sender) => {
-                            self.incoming_responses.insert(request.request_id, sender);
-                            self.writer.send(Message::Request(request)).await.unwrap();
-                        },
-                        ServiceInteraction::Oneshot(oneshot) => {
-                            self.writer.send(Message::Oneshot(oneshot)).await.unwrap();
-                        },
-                    }
-                },
+                    let response_sender = self
+                        .sans_service
+                        .recv_request(request_id, |data: S::Response| data.into())
+                        .await;
+
+                    let service = self.service.clone();
+
+                    self.service.spawn(async move {
+                        let response = service.handle_request(request).await?;
+                        _ = response_sender.send(response);
+                        Ok::<_, S::Error>(())
+                    });
+                }
+                crate::service_message::ServiceMessage::Oneshot(oneshot) => {
+                    let oneshot: S::Oneshot = oneshot.message.into();
+
+                    let service = self.service.clone();
+
+                    self.service
+                        .spawn(async move { service.handle_oneshot(oneshot).await });
+                }
             }
         }
-    }
-
-    pub async fn recv_stream<K: 'static, F: Fn(K) -> Out + 'static>(
-        &mut self,
-        stream_id: u64,
-        map: F,
-    ) -> futures::channel::mpsc::UnboundedSender<K> {
-        let (tx, rx) = futures::channel::mpsc::unbounded::<K>();
-
-        let rx = rx.map(map).map(move |value| StreamMessage {
-            stream_id,
-            data: value,
-        });
-
-        let stream = std::mem::replace(
-            &mut self.outgoing_stream,
-            Box::pin(futures::stream::pending()),
-        );
-
-        self.outgoing_stream = Box::pin(futures::stream::select(stream, rx));
-
-        tx
-    }
-
-    pub async fn recv_request<K: 'static>(
-        &mut self,
-        request_id: u64,
-        map: impl Fn(K) -> Out + 'static,
-    ) -> futures::channel::oneshot::Sender<K> {
-        let (tx, rx) = futures::channel::oneshot::channel::<K>();
-
-        let rx = rx.map(|a| a.unwrap()).map(map).map(move |value| Response {
-            request_id,
-            data: value,
-        });
-
-        let rx = futures::stream::once(rx);
-
-        let stream = std::mem::replace(
-            &mut self.outgoing_responses,
-            Box::pin(::futures::stream::pending()),
-        );
-
-        self.outgoing_responses = Box::pin(futures::stream::select(stream, rx));
-        tx
+        Ok(())
     }
 }

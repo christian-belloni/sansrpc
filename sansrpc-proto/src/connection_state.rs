@@ -19,6 +19,15 @@ impl<In, Out, Encoder, Decoder> ConnectionState<In, Out, Encoder, Decoder> {
             write: ConnectionWriteState::new(write),
         }
     }
+
+    pub fn into_split(
+        self,
+    ) -> (
+        ConnectionWriteState<Out, Encoder>,
+        ConnectionReadState<In, Decoder>,
+    ) {
+        (self.write, self.read)
+    }
 }
 
 pub struct ConnectionReadState<In, Decoder> {
@@ -53,6 +62,7 @@ impl<Out, Encoder> ConnectionWriteState<Out, Encoder> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct ConnectionConfig<Encoder, Decoder> {
     pub read_config: ReadConnectionConfig<Decoder>,
     pub write_config: WriteConnectionConfig<Encoder>,
@@ -98,12 +108,14 @@ impl<Encoder, Decoder> ConnectionConfig<Encoder, Decoder> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct ReadConnectionConfig<Decoder> {
     pub recv_queue_size: NonZeroUsize,
     pub recv_buffer_size: NonZeroUsize,
     coder: Decoder,
 }
 
+#[derive(Clone, Copy)]
 pub struct WriteConnectionConfig<Encoder> {
     pub send_queue_size: NonZeroUsize,
     pub send_buffer_size: NonZeroUsize,

@@ -70,12 +70,12 @@ pub mod tests {
         channel::mpsc::UnboundedReceiver,
         stream::{SplitSink, SplitStream},
     };
-    use sansrpc_compio::tcp::CompioSansConnection;
+    use sansrpc_compio::{CompioSansConnection, tcp::CompioSansListener};
     use sansrpc_macros::{oneshot, request, streaming};
     use sansrpc_proto::{
         bincode::BincodeSansCoder, connection_state::ConnectionConfig, message::Message,
     };
-    use sansrpc_service::{handle::ServiceHandle, service::SansService, service_message};
+    use sansrpc_service::{handle::ServiceHandle, sans_service::SansService, service_message};
     use serde::{Deserialize, Serialize};
 
     use crate::{Runtime, compio_runtime::CompioRuntime};
@@ -153,23 +153,19 @@ pub mod tests {
         where
             Impl: Clone,
         {
-            let listener = ::compio::net::TcpListener::bind(addr).await?;
+            let config = ConnectionConfig::builder::<ClientMessage, ServerMessage, _>()
+                .coder(BincodeSansCoder)
+                .build();
+            let mut listener = CompioSansListener::bind(config, addr).await?;
 
-            while let Ok((stream, _addr)) = listener.accept().await {
+            while let Ok(connection) = listener.accept().await {
                 println!("new connection");
 
                 let service = service.clone();
                 let _runtime = runtime.clone();
+
                 runtime.spawn(async move || {
-                    let (reader, writer) = stream.into_split();
-                    let connection = ::sansrpc_compio::tcp::CompioSansConnection::new(
-                        ConnectionConfig::builder::<ClientMessage, ServerMessage, _>()
-                            .coder(BincodeSansCoder)
-                            .build(),
-                        reader,
-                        writer,
-                    );
-                    let (writer, reader) = connection.split();
+                    let (writer, reader) = connection.into_split();
                     MyServiceImpl::new(service, _runtime, reader, writer)
                         .0
                         .run()
@@ -328,7 +324,7 @@ pub mod tests {
 
         let (reader, writer) = stream.into_split();
         let mut connection =
-            ::sansrpc_compio::tcp::CompioSansConnection::<ClientMessage, _, _, _, _, _>::new(
+            ::sansrpc_compio::CompioSansConnection::<ClientMessage, _, _, _, _, _>::new(
                 ConnectionConfig::builder::<ClientMessage, ServerMessage, _>()
                     .coder(BincodeSansCoder)
                     .build(),
